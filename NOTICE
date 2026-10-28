@@ -1,0 +1,9 @@
+sysgate
+Copyright 2026 vexify-org
+
+This product includes software developed by The gVisor Authors
+(https://github.com/google/gvisor), licensed under the
+Apache License, Version 2.0.
+
+sysgate itself is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.

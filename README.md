@@ -101,4 +101,7 @@ make build
 
 ## License
 
-Apache-2.0
+Apache-2.0，与 gVisor 保持一致。
+
+本项目通过 runsc 驱动 gVisor 沙箱；gVisor 由 The gVisor Authors 开发，同样以
+Apache License 2.0 授权，归属声明见 [NOTICE](NOTICE)。
