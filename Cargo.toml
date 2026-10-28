@@ -1,0 +1,23 @@
+[package]
+name = "sysgate"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "System Gateway For VM — fast gVisor sandbox gateway"
+repository = "https://github.com/vexify-org/sysgate"
+
+[dependencies]
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "process", "time", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

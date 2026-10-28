@@ -1,19 +1,22 @@
-.PHONY: build test vet fmt run clean
+.PHONY: build release test clippy fmt run clean
 
 build:
-	go build -trimpath -ldflags="-s -w" -o bin/sysgate ./cmd/sysgate
+	cargo build
+
+release:
+	cargo build --release
 
 test:
-	go test ./...
+	cargo test
 
-vet:
-	go vet ./...
+clippy:
+	cargo clippy --all-targets -- -D warnings
 
 fmt:
-	gofmt -w .
+	cargo fmt
 
 run:
-	go run ./cmd/sysgate
+	cargo run
 
 clean:
-	rm -rf bin dist
+	cargo clean

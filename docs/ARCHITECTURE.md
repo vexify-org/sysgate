@@ -1,71 +1,88 @@
-# sysgate 架构
+# sysgate architecture
 
-## 目标
+## Goals
 
-把 gVisor 沙箱做成低延迟、可直接编程的网关资源：
+Turn gVisor sandboxes into low-latency, programmable gateway resources:
 
-- **快**：请求路径上没有沙箱启动开销（预热池）。
-- **小**：单个静态二进制，零第三方依赖。
-- **稳**：每个沙箱独立 gVisor 内核，用户态隔离，不共享宿主内核攻击面。
+- **Fast**: no sandbox boot cost on the request path (warm pool).
+- **Small**: one static binary with a lean dependency set.
+- **Isolated**: every sandbox runs its own gVisor user-space kernel instead of
+  sharing the host kernel attack surface.
 
-## 组件
+## Components
 
 ```
-cmd/sysgate          进程入口：配置、驱动选择、HTTP 服务、优雅退出
-internal/gateway     HTTP API、活跃沙箱表、TTL 回收、指标
-internal/pool        预热池：channel 队列 + 后台补充 goroutine
-internal/sandbox     Driver 接口与领域类型
-internal/sandbox/runsc   gVisor 驱动（OCI bundle + runsc CLI）
-internal/sandbox/fake    内存驱动（测试/演示）
+src/main.rs            process entry: config, driver selection, HTTP server, graceful shutdown
+src/gateway.rs         HTTP API, active sandbox table, TTL reaper, metrics
+src/pool.rs            warm pool: mpsc queue + background refill task
+src/sandbox/mod.rs     Driver enum and domain types
+src/sandbox/runsc.rs   gVisor driver (OCI bundle + runsc CLI)
+src/sandbox/fake.rs    in-memory driver for tests and demos
 ```
 
-## 请求路径（快路径）
+## Request path (fast path)
 
 1. `POST /v1/sandboxes`
-2. gateway 检查活跃上限。
-3. `pool.Acquire` 从 `warm` channel 取一个已启动的沙箱（微秒级）。
-4. 后台 refill goroutine 立即创建新沙箱补位。
-5. 返回 201 + 沙箱元数据。
+2. The gateway checks the active sandbox limit.
+3. `pool.acquire` pops a pre-booted sandbox from the warm channel (microseconds).
+4. The background refill task immediately creates a replacement.
+5. The gateway returns 201 with sandbox metadata.
 
-池空时 `Acquire` 走慢路径：同步创建（runsc 启动）。这保证正确性，但延迟更高；`sysgate_pool_misses_total` 可用于观察并调大 `SYSGATE_POOL_SIZE`。
+When the pool is empty, `acquire` takes the slow path and creates a sandbox
+synchronously (runsc boot). This preserves correctness at higher latency; watch
+`sysgate_pool_misses_total` and raise `SYSGATE_POOL_SIZE` when it grows.
 
-## gVisor 生命周期
+## gVisor lifecycle
 
-`runsc` 驱动为每个沙箱生成 OCI bundle：
+The `runsc` driver generates an OCI bundle per sandbox:
 
 ```
 <SYSGATE_ROOT>/sandboxes/<id>/bundle/
-├── config.json   # 最小 OCI runtime spec
-└── (rootfs 由 SYSGATE_ROOTFS 指向，不入 bundle 目录)
+└── config.json   # minimal OCI runtime spec
 ```
 
-- **创建**：`runsc --root <root> run -d --bundle <bundle> --network <mode> <id>`，init 进程为 `sh -c 'while :; do sleep 3600; done'`，使沙箱保持存活。
-- **执行**：`runsc --root <root> exec [--cwd] [--env ...] <id> <argv...>`，超时由 `exec.CommandContext` 终止。
-- **销毁**：`runsc kill <id> KILL` + `runsc delete -force <id>`，并清理本地 bundle 目录。
+The rootfs is referenced by `SYSGATE_ROOTFS` and is not copied into the bundle.
 
-沙箱 ID 使用 `crypto/rand` 生成（`sg-` + 24 hex），驱动侧再做字符白名单校验，避免路径穿越。
+- **Create**: `runsc --root <root> run -d --bundle <bundle> --network <mode> <id>`.
+  The init process is `sh -c 'while :; do sleep 3600; done'`, keeping the
+  sandbox alive.
+- **Exec**: `runsc --root <root> exec [--cwd] [--env ...] <id> <argv...>`.
+  Timeouts are enforced by `tokio::time::timeout`; `kill_on_drop` terminates the
+  client process when the future is cancelled.
+- **Destroy**: `runsc kill <id> KILL` followed by `runsc delete -force <id>`,
+  then the local bundle directory is removed.
 
-## TTL 回收
+Sandbox IDs come from `crypto`-grade randomness (`uuid` v4, `sg-` prefix) and
+are re-validated against a lowercase alphanumeric-plus-dash allowlist in the
+driver, preventing path traversal.
 
-gateway 内一个 ticker 周期性扫描活跃表，删除过期条目并销毁沙箱。默认 TTL 10 分钟，可通过请求 `ttl_seconds` 覆盖；`ttl_seconds: 0` 使用服务端默认值。
+## TTL reaping
 
-## 并发模型
+A tokio interval task scans the active table, removes expired entries, and
+destroys their sandboxes. The default TTL is 10 minutes; callers can override it
+with `ttl_seconds` (`0` means "use the server default").
 
-- 活跃表：`sync.RWMutex` + map。
-- 预热池：有缓冲 channel，容量即池大小；refill 单 goroutine，避免创建风暴。
-- 计数器：`sync/atomic`，`/metrics` 读取无锁。
-- 优雅退出：HTTP shutdown → gateway reaper 停止 → 池内沙箱销毁 → 驱动关闭。
+## Concurrency model
 
-## 安全边界
+- Active table: `tokio::sync::RwLock<HashMap<..>>`.
+- Warm pool: bounded `mpsc` channel whose capacity is the pool size; a single
+  refill task avoids creation storms.
+- Counters: atomics, so `/metrics` never blocks request handling.
+- Graceful shutdown: HTTP shutdown → reaper aborted → warm sandboxes destroyed →
+  process exits.
 
-- 每个沙箱由 gVisor 用户态内核隔离，系统调用不直接触达宿主内核。
-- 默认 `--network none`，不暴露网络；需要时显式切换。
-- API 本身不做认证，预期部署在可信内网或前置鉴权网关之后。
+## Security boundaries
 
-## 路线图
+- Each sandbox is isolated by the gVisor user-space kernel; syscalls do not
+  reach the host kernel directly.
+- `--network none` by default; networking is opt-in.
+- The API has no authentication of its own and is meant to sit behind a trusted
+  network boundary or an authenticating proxy.
 
-1. **快照**：runsc checkpoint/restore，预热改为「恢复快照」，进一步压缩冷启动。
-2. **镜像**：OCI registry 拉取 + rootfs 缓存（content-addressable）。
-3. **网络**：每沙箱策略、vsock 数据通道。
-4. **多节点**：池水位指标驱动的调度器。
-5. **可观测**：OpenTelemetry traces + 结构化审计日志。
+## Roadmap
+
+1. **Snapshots**: runsc checkpoint/restore, turning warm-up into snapshot restore.
+2. **Images**: OCI registry pulls plus a content-addressable rootfs cache.
+3. **Network**: per-sandbox policy and vsock data channels.
+4. **Multi-node**: scheduler driven by pool watermark metrics.
+5. **Observability**: OpenTelemetry traces and structured audit logs.

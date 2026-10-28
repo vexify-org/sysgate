@@ -1,20 +1,22 @@
 # sysgate
 
-**System Gateway For VM** — 基于 gVisor 的极速沙箱网关。
+**System Gateway For VM** — a fast gVisor sandbox gateway.
 
-sysgate 把 gVisor（runsc）沙箱封装成低延迟 HTTP 网关：预热池里始终有待命沙箱，请求到达时直接取用，而不是现场等待沙箱启动。
+sysgate wraps gVisor (`runsc`) sandboxes in a low-latency HTTP gateway: a warm
+pool keeps sandboxes ready, so requests are served immediately instead of
+waiting for a cold boot.
 
-## 为什么快
+## Why it's fast
 
-| 手段 | 效果 |
-|------|------|
-| 预热沙箱池 | `POST /v1/sandboxes` 从池中 O(1) 取用，避开 runsc 冷启动 |
-| 异步补池 | 取用后后台立即补充；池空时退化为按需创建 |
-| 零第三方依赖 | 仅 Go 标准库，无供应链负担，静态单二进制 |
-| 直连 runsc | 不经过额外代理层，`runsc exec` 直达沙箱 |
-| 标准库 HTTP | 最小中间件、keep-alive、低分配 |
+| Technique | Effect |
+|-----------|--------|
+| Warm sandbox pool | `POST /v1/sandboxes` takes O(1) from the pool, skipping runsc cold start |
+| Async refill | Refills immediately after checkout; falls back to on-demand creation when empty |
+| Lean async stack | tokio + axum + serde; no GC, no runtime; single release binary |
+| Direct runsc | No extra proxy hop; `runsc exec` goes straight to the sandbox |
+| Low-allocation path | keep-alive, minimal middleware, atomic counters |
 
-## 架构
+## Architecture
 
 ```
 client ──HTTP──> gateway ──> warm pool ──> runsc (gVisor) sandboxes
@@ -22,44 +24,44 @@ client ──HTTP──> gateway ──> warm pool ──> runsc (gVisor) sandbo
                     └── TTL reaper             └── exec / kill / delete
 ```
 
-- `internal/gateway` — HTTP API、TTL 回收、Prometheus 指标
-- `internal/pool` — 预热池（channel 队列 + 后台补充）
-- `internal/sandbox` — Driver 抽象
-- `internal/sandbox/runsc` — gVisor 驱动（OCI bundle + runsc CLI）
-- `internal/sandbox/fake` — 内存驱动（本地开发/测试）
+- `src/gateway.rs` — HTTP API, TTL reaper, Prometheus metrics
+- `src/pool.rs` — warm pool (mpsc queue + background refill task)
+- `src/sandbox/mod.rs` — Driver abstraction
+- `src/sandbox/runsc.rs` — gVisor driver (OCI bundle + runsc CLI)
+- `src/sandbox/fake.rs` — in-memory driver for local development and tests
 
-详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
-## 快速开始
+## Quick start
 
-本地试跑（fake 驱动，无需 gVisor）：
+Run locally with the fake driver (no gVisor required):
 
 ```bash
-go run ./cmd/sysgate
+cargo run
 curl -s -X POST localhost:8080/v1/sandboxes
 ```
 
-gVisor 模式：
+gVisor mode:
 
 ```bash
-# 安装 runsc: https://gvisor.dev/docs/user_guide/install/
+# Install runsc: https://gvisor.dev/docs/user_guide/install/
 export SYSGATE_DRIVER=runsc
-export SYSGATE_ROOTFS=/srv/busybox-rootfs   # 需包含 /bin/sh 与 sleep
+export SYSGATE_ROOTFS=/srv/busybox-rootfs   # must contain /bin/sh and sleep
 export SYSGATE_POOL_SIZE=8
-go run ./cmd/sysgate
+cargo run --release
 ```
 
 ## API
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/v1/sandboxes` | 创建沙箱（优先取用预热沙箱） |
-| GET | `/v1/sandboxes` | 列出活跃沙箱 |
-| GET | `/v1/sandboxes/{id}` | 查询沙箱 |
-| DELETE | `/v1/sandboxes/{id}` | 销毁沙箱 |
-| POST | `/v1/sandboxes/{id}/exec` | 在沙箱内执行命令 |
-| GET | `/healthz` | 健康检查 |
-| GET | `/metrics` | Prometheus 指标 |
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/sandboxes` | Create a sandbox (takes a warm one when available) |
+| GET | `/v1/sandboxes` | List active sandboxes |
+| GET | `/v1/sandboxes/{id}` | Get a sandbox |
+| DELETE | `/v1/sandboxes/{id}` | Destroy a sandbox |
+| POST | `/v1/sandboxes/{id}/exec` | Execute a command inside a sandbox |
+| GET | `/healthz` | Health check |
+| GET | `/metrics` | Prometheus metrics |
 
 ```bash
 ID=$(curl -s -X POST localhost:8080/v1/sandboxes | jq -r .id)
@@ -68,40 +70,41 @@ curl -s -X POST localhost:8080/v1/sandboxes/$ID/exec \
 # {"stdout":"hello\n","stderr":"","exit_code":0,"duration_ms":3}
 ```
 
-## 配置
+## Configuration
 
-| 环境变量 | 默认 | 说明 |
-|----------|------|------|
-| `SYSGATE_LISTEN` | `:8080` | 监听地址 |
-| `SYSGATE_DRIVER` | `fake` | `fake` / `runsc` |
-| `SYSGATE_RUNSC_BIN` | `runsc` | runsc 路径 |
-| `SYSGATE_ROOT` | `/var/lib/sysgate` | 状态目录 |
-| `SYSGATE_ROOTFS` | — | 沙箱 rootfs（runsc 必填） |
-| `SYSGATE_NETWORK` | `none` | runsc 网络模式 |
-| `SYSGATE_POOL_SIZE` | `4` | 预热池大小 |
-| `SYSGATE_MAX_SANDBOXES` | `256` | 活跃上限 |
-| `SYSGATE_DEFAULT_TTL` | `10m` | 默认 TTL |
-| `SYSGATE_EXEC_TIMEOUT` | `30s` | 默认 exec 超时 |
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `SYSGATE_LISTEN` | `:8080` | Listen address |
+| `SYSGATE_DRIVER` | `fake` | `fake` or `runsc` |
+| `SYSGATE_RUNSC_BIN` | `runsc` | Path to the runsc binary |
+| `SYSGATE_ROOT` | `/var/lib/sysgate` | State directory |
+| `SYSGATE_ROOTFS` | — | Sandbox rootfs (required for runsc) |
+| `SYSGATE_NETWORK` | `none` | runsc network mode |
+| `SYSGATE_POOL_SIZE` | `4` | Warm pool size |
+| `SYSGATE_MAX_SANDBOXES` | `256` | Active sandbox limit |
+| `SYSGATE_DEFAULT_TTL` | `10m` | Default sandbox TTL |
+| `SYSGATE_EXEC_TIMEOUT` | `30s` | Default exec timeout |
 
-## 开发
+## Development
 
 ```bash
-make test
-make vet
-make build
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt
+cargo build --release
 ```
 
-## 路线图
+## Roadmap
 
-- [ ] runsc checkpoint/restore 快照，把冷启动压到毫秒级
-- [ ] OCI 镜像拉取与 rootfs 缓存
-- [ ] 每沙箱网络策略 / vsock 通道
-- [ ] 多节点调度与池水位控制
-- [ ] OpenTelemetry 追踪
+- [ ] runsc checkpoint/restore snapshots for millisecond cold starts
+- [ ] OCI image pull and rootfs caching
+- [ ] Per-sandbox network policy / vsock channels
+- [ ] Multi-node scheduling and pool watermarks
+- [ ] OpenTelemetry tracing
 
 ## License
 
-Apache-2.0，与 gVisor 保持一致。
+Apache-2.0, matching gVisor.
 
-本项目通过 runsc 驱动 gVisor 沙箱；gVisor 由 The gVisor Authors 开发，同样以
-Apache License 2.0 授权，归属声明见 [NOTICE](NOTICE)。
+sysgate drives gVisor sandboxes through runsc. gVisor is developed by The
+gVisor Authors and licensed under the Apache License 2.0. See [NOTICE](NOTICE).
