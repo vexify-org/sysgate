@@ -67,25 +67,29 @@ impl RunscDriver {
         std::fs::write(bundle.join("config.json"), data)
             .map_err(|e| Error::Io(format!("write config.json: {e}")))?;
 
-        let output = Command::new(&self.bin)
+        let stderr_path = dir.join("runsc.stderr");
+        let stderr = std::fs::File::create(&stderr_path)
+            .map_err(|e| Error::Io(format!("create runsc stderr log: {e}")))?;
+        let status = Command::new(&self.bin)
             .arg("--root")
             .arg(&self.root)
-            .arg("run")
-            .arg("-d")
-            .arg("--bundle")
-            .arg(&bundle)
             .arg("--network")
             .arg(&self.network)
+            .arg("run")
+            .arg("-detach")
+            .arg("--bundle")
+            .arg(&bundle)
             .arg(&id)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .status()
             .await
             .map_err(|e| Error::Io(format!("runsc run: {e}")))?;
-        if !output.status.success() {
+        if !status.success() {
+            let message = std::fs::read_to_string(&stderr_path).unwrap_or_default();
             let _ = std::fs::remove_dir_all(&dir);
-            return Err(Error::Io(format!(
-                "runsc run: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(Error::Io(format!("runsc run: {}", message.trim())));
         }
 
         let now = Utc::now();

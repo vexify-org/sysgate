@@ -1,3 +1,4 @@
 /target/
+/.runsc/
 *.log
 .DS_Store

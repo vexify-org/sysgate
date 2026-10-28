@@ -51,6 +51,27 @@ export SYSGATE_POOL_SIZE=8
 cargo run --release
 ```
 
+The gVisor release tarball contains `runsc` plus sidecar binaries under
+`gvisor-bin/`. Install both, otherwise sandbox creation fails with
+`sidecar "gvisor_sentry" not usable`:
+
+```bash
+curl -fsSLO https://github.com/google/gvisor/releases/download/release-20261026.0/gvisor-x86_64.tar.bz2
+tar xjf gvisor-x86_64.tar.bz2
+sudo install -m 0755 runsc /usr/local/bin/runsc
+sudo install -d /usr/local/bin/gvisor-bin
+sudo install -m 0755 gvisor-bin/* /usr/local/bin/gvisor-bin/
+```
+
+Verify that workloads really run on gVisor:
+
+```bash
+ID=$(curl -s -X POST localhost:8080/v1/sandboxes | jq -r .id)
+curl -s -X POST localhost:8080/v1/sandboxes/$ID/exec \
+  -d '{"argv":["cat","/proc/version"]}'
+# {"stdout":"Linux version 4.19.0-gvisor ...","stderr":"","exit_code":0,...}
+```
+
 ## API
 
 | Method | Path | Description |

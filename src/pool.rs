@@ -63,29 +63,24 @@ impl Pool {
             if self.closed.load(Ordering::Acquire) {
                 return;
             }
+            let permit = tokio::select! {
+                permit = self.tx.reserve() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
+                _ = self.shutdown.notified() => return,
+            };
             match self.driver.create(&self.spec).await {
                 Ok(handle) => {
                     if self.closed.load(Ordering::Acquire) {
                         let _ = self.driver.destroy(&handle.id).await;
                         return;
                     }
-                    let permit = tokio::select! {
-                        permit = self.tx.reserve() => match permit {
-                            Ok(permit) => permit,
-                            Err(_) => {
-                                let _ = self.driver.destroy(&handle.id).await;
-                                return;
-                            }
-                        },
-                        _ = self.shutdown.notified() => {
-                            let _ = self.driver.destroy(&handle.id).await;
-                            return;
-                        }
-                    };
                     permit.send(handle);
                     backoff = Duration::from_millis(100);
                 }
                 Err(err) => {
+                    drop(permit);
                     self.errors.fetch_add(1, Ordering::Relaxed);
                     eprintln!("warm pool create failed: {err} (retry in {backoff:?})");
                     tokio::select! {
