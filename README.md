@@ -6,6 +6,12 @@ sysgate wraps gVisor (`runsc`) sandboxes in a low-latency HTTP gateway: a warm
 pool keeps sandboxes ready, so requests are served immediately instead of
 waiting for a cold boot.
 
+## Demo
+
+![sysgate demo: warm gVisor sandboxes behind an HTTP API](docs/demo.gif)
+
+[MP4 version](docs/demo.mp4) · [asciinema recording](docs/demo.cast)
+
 ## Why it's fast
 
 | Technique | Effect |
